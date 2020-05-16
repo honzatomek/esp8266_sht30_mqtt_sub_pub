@@ -1,140 +1,131 @@
-# standard imports
-import time
-from time import sleep
-
-# microPython imports
+#embedded modules
+print('\n[i] importing embedded modules')
 import machine
-from machine import Timer, Pin
-import network
-import ujson
+from utime import sleep_ms, time
+import ntptime
+from ujson import dumps, loads
+from umqtt.simple import MQTTClient
+
+# personal modules
+print('[i] importing personal modules')
+from config import *
 from SHT30 import SHT30
-from umqtt_simple import MQTTClient
+from wifi import WiFi
 
 
-WIFI_SSID = '************'
-WIFI_PW = '*********'
-
-SERVER = '***********'
-CLIENT_ID = '*********'
-PORT = 1883
-UN = '*********'
-PW = '*********'
-TOPIC = b'esp8266-2'
-# TOPIC_LED = b'esp8266-2/led'
-TOPIC_LED = b'led'
-WAIT = 15   # wait time in seconds between measuring
-
-STATE = 1
-LED = Pin(2, Pin.OUT, STATE)
-
-def timeout_callback(t):
-    raise Exception('WiFi connection timeout!')
+# global variables
+print('[i] assigning global variables')
+led = machine.Pin(2, machine.Pin.OUT, value=1)
+sensor = SHT30()
+wifi = WiFi(WIFI_SSID, WIFI_PW)
+rtc = machine.RTC()
+rtc.irq(trigger=rtc.ALARM0, wake=machine.DEEPSLEEP)
 
 
-def do_connect():
-    network.WLAN(network.AP_IF).active(False)
-    sta_if = network.WLAN(network.STA_IF)
-    if not sta_if.isconnected():
-        print('connecting to network "{0}"'.format(WIFI_SSID))
-        sta_if.active(True)
-        sta_if.connect(WIFI_SSID, WIFI_PW)
-        while not sta_if.isconnected():
-            pass
-    print('network config:', sta_if.ifconfig())
-
-    if sta_if.ifconfig()[0] != '0.0.0.0':
-        print('connected')
-        p = Pin(2, Pin.OUT, 1)
-        for i in range(6):
-            p.value(not p.value())
-            sleep(0.3)
-        p.value(1)
-
-
-def check_connection():
-    sta_if = network.WLAN(network.STA_IF)
-    return sta_if.isconnected()
+# help functions
+def blink(number=3, duration=250):
+    print('[i] running function: blink()')
+    global led
+    for i in range(2 * number):
+        led.value(not led.value())
+        sleep_ms(duration)
 
 
 def connect():
-    timer = Timer(0)
-    TIMEOUT_MS = 5000
-    timer.init(period=TIMEOUT_MS, mode=Timer.ONE_SHOT, callback=timeout_callback)
+    print('[i] running function: connect()')
+    global wifi
+    global rtc
+    if not wifi.isconnected():
+        connected = False
+        while not connected:
+            try:
+                connected = wifi.connect()
+            except Exception:
+                rtc.alarm(rtc.ALARM0, 1000 * 30)
+                machine.deepsleep()
+    print('[i] wifi connected.')
+    blink(3)
+
+
+connect()
+print('[i] setting correct time')
+ntptime.settime()  # set the rtc datetime from the remote server
+
+
+def callback(topic, msg):
+    print('[i] running function callback() for topic: {0}'.format(topic))
     try:
-        do_connect()
-        timer.deinit()
-    except:
-        print('Connection timeout!')
+        message = loads(msg)
+        print(message)
+        for key in message:
+            if key == 'led':
+                global led
+                if message[key] == 'on':
+                    led.value(0)
+                elif message[key] == 'off':
+                    led.value(1)
+                else:
+                    led.value(not led.value())
+            elif key == 'temp':
+                global sensor
+                t, h = sensor.measure()
+                if isinstance(t, float) and isinstance(h, float):
+                    print('[i] setting delta_temp value to: {0}.'.format(float(message[key]) - t + sensor.delta_temp))
+                    sensor.set_delta(delta_temp=float(message[key]) - t + sensor.delta_temp)
+            elif key == 'humidity':
+                global sensor
+                t, h = sensor.measure()
+                if isinstance(t, float) and isinstance(h, float):
+                    print('[i] setting delta_hum value to: {0}.'.format(float(message[key]) - h + sensor.delta_hum))
+                    sensor.set_delta(delta_hum=float(message[key]) - h + sensor.delta_hum)
+            else:
+                blink(1)
+    except Exception as e:
+        print('[-] Payload is not in json format.')
+        print('    payload: {0}'.format(msg))
 
 
-def callback_led(topic, msg):
-    # global state
-    print((topic, msg))
-    if msg == b"on":
-        LED.value(1)
-        STATE = 0
-    elif msg == b"off":
-        LED.value(0)
-        STATE = 1
-    elif msg == b"toggle":
-        # LED is inversed, so setting it to current state
-        # value will make it toggle
-        LED.value(STATE)
-        STATE = 1 - STATE
+print('[i] setting up mqtt client')
+mqtt = MQTTClient(MQTT_CLIENT_ID, MQTT_BROKER)
+mqtt.set_callback(callback)
+mqtt.connect()
+mqtt.subscribe(TOPIC_IN)
 
 
-def check():
-    c = MQTTClient(CLIENT_ID, SERVER, port=PORT, user=UN, password=PW)     # (client, server, port, user, password)
-    c.set_callback(callback_led)
-    c.connect()
-    c.subscribe(TOPIC_LED)
-    c.check_msg()
-    sleep(1)
-    c.disconnect()
+def measure_and_publish():
+    print('[i] running function measure_and_publish()')
+    global sensor
+    global mqtt
+    global rtc
+    global led
+    data = dict()
+    tm = rtc.datetime()     # get the date and time in UTC
+    t, h = sensor.measure()
+    l = 'on' if led.value() == 0 else 'off'
+    if isinstance(t, float) and isinstance(h, float):
+        data['temperature'] = {'value': t, 'units': 'C'}
+        data['humidity'] = {'value': h, 'units': '%'}
+        data['time'] = {'date': '{0:04}/{1:02}/{2:02}'.format(tm[0], tm[1], tm[2]),
+                        'time': '{0:02}:{1:02}:{2:02}.{3:03}'.format(tm[4], tm[5], tm[6], tm[7])}
+        data['led'] = l
+        mqtt.publish(TOPIC_OUT, dumps(data))
 
 
-def measure():
-    c = MQTTClient(CLIENT_ID, SERVER, port=PORT, user=UN, password=PW)     # (client, server, port, user, password)
-    c.connect()
-    #c.publish(b'foo_topic', b'{0} - hello'.format(time.time()))
-    sensor = SHT30()
-    sensor.set_delta(0.0, 0.0)
-    data = {}
-#   t, h = sensor.measure()
+measure_and_publish()
+i = 0
+print('[i] running main loop')
+while True:
     try:
-        t, h = sensor.measure()   # measure temperature and humidity values
-        if isinstance(t, float) and isinstance(h, float):  # Confirm sensor values are numeric
-            data['Temperature'] = t
-            data['Humidity'] = h
-            data['Time'] = time.time()
-            msg = ujson.dumps(data).encode()
-            # msg = (b'Time: {0}, Temperature: {1:3.2f}, Humidity: {2:3.2f}'.format(time.time(), t, h))
-            c.publish(TOPIC, msg)  # Publish sensor readings to MQTT topic
-            print(msg)
-        else:
-            print('Invalid sensor readings.')
-    except OSError:
-        print('Failed to read sensor.')
-    c.disconnect()
-
-
-def main():
-    try:
-        i = 0
-        while True:
-            i += 1
-            if not check_connection():
-                connect()
-            check()
-            if ( i % (WAIT - 1) ) == 0:
-                measure()
-                i = 0
-            # sleep(WAIT)
-            sleep(1.0)
-    except Exception:
-        print('Connection timeout!')
-        machine.reset()
-
-
-if __name__ == '__main__':
-    main()
+        i += SUBSCRIBE_DELAY
+        mqtt.check_msg()
+        if i >= PUBLISH_DELAY:
+            measure_and_publish()
+            i = 0
+        sleep_ms(SUBSCRIBE_DELAY)
+    except Exception as e:
+        print(e)
+        connect()
+        mqtt = MQTTClient(MQTT_CLIENT_ID, MQTT_BROKER)
+        mqtt.set_callback(callback)
+        mqtt.connect()
+        mqtt.subsribe(TOPIC_IN)
