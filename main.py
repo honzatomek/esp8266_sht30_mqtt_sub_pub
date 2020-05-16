@@ -124,8 +124,4 @@ while True:
         sleep_ms(SUBSCRIBE_DELAY)
     except Exception as e:
         print(e)
-        connect()
-        mqtt = MQTTClient(MQTT_CLIENT_ID, MQTT_BROKER)
-        mqtt.set_callback(callback)
-        mqtt.connect()
-        mqtt.subsribe(TOPIC_IN)
+        machine.reset()
