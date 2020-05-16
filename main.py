@@ -13,15 +13,6 @@ from SHT30 import SHT30
 from wifi import WiFi
 
 
-# global variables
-print('[i] assigning global variables')
-led = machine.Pin(2, machine.Pin.OUT, value=1)
-sensor = SHT30()
-wifi = WiFi(WIFI_SSID, WIFI_PW)
-rtc = machine.RTC()
-rtc.irq(trigger=rtc.ALARM0, wake=machine.DEEPSLEEP)
-
-
 # help functions
 def blink(number=3, duration=250):
     print('[i] running function: blink()')
@@ -45,11 +36,6 @@ def connect():
                 machine.deepsleep()
     print('[i] wifi connected.')
     blink(3)
-
-
-connect()
-print('[i] setting correct time')
-ntptime.settime()  # set the rtc datetime from the remote server
 
 
 def callback(topic, msg):
@@ -78,18 +64,16 @@ def callback(topic, msg):
                 if isinstance(t, float) and isinstance(h, float):
                     print('[i] setting delta_hum value to: {0}.'.format(float(message[key]) - h + sensor.delta_hum))
                     sensor.set_delta(delta_hum=float(message[key]) - h + sensor.delta_hum)
+            elif key == 'machine':
+                if message[key] == 'reset':
+                    machine.reset()
+                elif message[key] == 'status':
+                    measure_and_publish()
             else:
                 blink(1)
     except Exception as e:
         print('[-] Payload is not in json format.')
         print('    payload: {0}'.format(msg))
-
-
-print('[i] setting up mqtt client')
-mqtt = MQTTClient(MQTT_CLIENT_ID, MQTT_BROKER)
-mqtt.set_callback(callback)
-mqtt.connect()
-mqtt.subscribe(TOPIC_IN)
 
 
 def measure_and_publish():
@@ -110,6 +94,24 @@ def measure_and_publish():
         data['led'] = l
         mqtt.publish(TOPIC_OUT, dumps(data))
 
+
+# global variables
+print('[i] assigning global variables')
+led = machine.Pin(2, machine.Pin.OUT, value=1)
+sensor = SHT30()
+wifi = WiFi(WIFI_SSID, WIFI_PW)
+rtc = machine.RTC()
+rtc.irq(trigger=rtc.ALARM0, wake=machine.DEEPSLEEP)
+
+connect()
+print('[i] setting correct time')
+ntptime.settime()  # set the rtc datetime from the remote server
+
+print('[i] setting up mqtt client')
+mqtt = MQTTClient(MQTT_CLIENT_ID, MQTT_BROKER)
+mqtt.set_callback(callback)
+mqtt.connect()
+mqtt.subscribe(TOPIC_IN)
 
 measure_and_publish()
 i = 0
